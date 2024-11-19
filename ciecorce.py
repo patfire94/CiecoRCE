@@ -19,14 +19,14 @@ aiohttp_logger.setLevel(logging.CRITICAL)
 banner = f"""
 {Fore.GREEN}{Style.BRIGHT}
   ______   ______  _______
- /      \ /      \|       \\
+ /      \\ /      \\|       \\
 |  $$$$$$|  $$$$$$| $$$$$$$\\
-| $$__| $| $$___\$$ $$__/ $$
-| $$    $ \$$    \| $$    $$
-| $$$$$$$ _\$$$$$$| $$$$$$$\\
-| $$  | $|  \__| $| $$__/ $$
-| $$  | $$\$$    $| $$    $$
- \$$   \$$ \$$$$$$ \$$$$$$${Style.RESET_ALL}
+| $$__| $| $$___\\$$ $$__/ $$
+| $$    $ \\$$    \\| $$    $$
+| $$$$$$$ _\\$$$$$$| $$$$$$$\\
+| $$  | $|  \\__| $| $$__/ $$
+| $$  | $$\\$$    $| $$    $$
+ \\$$   \\$$ \\$$$$$$ \\$$$$$$$${Style.RESET_ALL}
 CIECORCE - Blind RCE Scanner
 """
 
@@ -49,7 +49,6 @@ def modify_url(url, param, payload):
     scheme, netloc, path, query_dict, fragment = parse_url(url)
     if param in query_dict:
         modified_query = query_dict.copy()
-        # Append the payload to the existing parameter value
         modified_query[param] = [value + payload for value in query_dict[param]]
         query_string = urlencode(modified_query, doseq=True)
         return urlunsplit((scheme, netloc, path, query_string, fragment))
@@ -69,12 +68,15 @@ def send_to_discord(webhook_url, url, payload):
         print(f"{Fore.RED}[!] Error sending to Discord: {e}")
 
 class BlindRCEScanner:
-    def __init__(self, urls, payloads, concurrency, timeout, delay, headers, webhook, verbose):
+    def __init__(self, urls, payloads, output_file, concurrency, timeout, delay, min_response_time, max_response_time, headers, webhook, verbose):
         self.urls = urls
         self.payloads = payloads
+        self.output_file = output_file
         self.concurrency = concurrency
         self.timeout = timeout
         self.delay = delay
+        self.min_response_time = min_response_time
+        self.max_response_time = max_response_time
         self.headers = headers
         self.webhook = webhook
         self.verbose = verbose
@@ -89,11 +91,14 @@ class BlindRCEScanner:
                 start = time.time()
                 async with session.get(modified_url, headers=self.headers, timeout=self.timeout) as response:
                     response_time = time.time() - start
-                    if response_time >= self.delay:
+                    if self.min_response_time <= response_time <= self.max_response_time and response_time >= self.delay:
                         print(f"{Fore.GREEN}[+] Vulnerable: {modified_url} | Payload: {payload}")
                         self.results.append((modified_url, payload))
                         if self.webhook:
                             send_to_discord(self.webhook, modified_url, payload)
+            except asyncio.TimeoutError:
+                if self.verbose:
+                    print(f"{Fore.RED}[!] Timeout for {modified_url}. Skipping...")
             except Exception as e:
                 if self.verbose:
                     print(f"{Fore.RED}[!] Error testing {url} with payload {payload}: {e}")
@@ -108,34 +113,42 @@ class BlindRCEScanner:
                 for param in query_dict:
                     for payload in self.payloads:
                         tasks.append(self.test_url(sem, session, url, payload, param))
-            await asyncio.gather(*tasks)
+            with tqdm(total=len(tasks), desc="Scanning URLs", unit="task") as pbar:
+                for f in asyncio.as_completed(tasks):
+                    await f
+                    pbar.update(1)
 
 def main():
     clear_screen()
     print(banner)
 
     parser = argparse.ArgumentParser(description="CIECORCE - Blind RCE Scanner")
-    parser.add_argument("-u", "--urls", required=True, help="File containing the list of URLs")
-    parser.add_argument("-p", "--payloads", required=True, help="File containing the list of payloads")
-    parser.add_argument("-o", "--output", default="ciecorce_output.txt", help="File to save the vulnerable URLs")
+    parser.add_argument("-l", "--list", required=True, help="File containing the list of URLs to scan")
+    parser.add_argument("-p", "--payload", required=True, help="File with test payloads")
+    parser.add_argument("-o", "--output", default="output.txt", help="File to save vulnerable URLs")
     parser.add_argument("-c", "--concurrency", type=int, default=10, help="Number of concurrent requests")
-    parser.add_argument("-t", "--timeout", type=int, default=10, help="Request timeout")
-    parser.add_argument("-d", "--delay", type=int, default=5, help="Minimum delay to consider as vulnerable")
-    parser.add_argument("--headers", help="File with custom headers in JSON format")
-    parser.add_argument("--webhook", help="Discord webhook URL for alerts")
-    parser.add_argument("-v", "--verbose", action="store_true", help="Enable verbose output")
+    parser.add_argument("-t", "--timeout", type=int, default=30, help="Request timeout in seconds")
+    parser.add_argument("-d", "--delay", type=float, default=5.0, help="Response time in seconds suggesting vulnerability")
+    parser.add_argument("-n", "--min-response-time", type=float, default=1.0, help="Minimum response time considered vulnerable")
+    parser.add_argument("-m", "--max-response-time", type=float, default=20.0, help="Max response time before skipping the URL")
+    parser.add_argument("-v", "--verbose", action="store_true", help="Enable detailed output")
+    parser.add_argument("--headers", help="Optional file in JSON format with custom headers")
+    parser.add_argument("--webhook", help="Discord webhook URL for sending alerts")
     args = parser.parse_args()
 
-    urls = read_file(args.urls)
-    payloads = read_file(args.payloads)
+    urls = read_file(args.list)
+    payloads = read_file(args.payload)
     headers = read_file(args.headers, as_json=True) if args.headers else {}
 
     scanner = BlindRCEScanner(
         urls=urls,
         payloads=payloads,
+        output_file=args.output,
         concurrency=args.concurrency,
         timeout=args.timeout,
         delay=args.delay,
+        min_response_time=args.min_response_time,
+        max_response_time=args.max_response_time,
         headers=headers,
         webhook=args.webhook,
         verbose=args.verbose
